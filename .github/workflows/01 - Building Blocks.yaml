@@ -3,12 +3,12 @@ name: 01-Building-blocks
 on : push 
 jobs:
   echo-hello:
-    runs-on : ubuntu-lates
+    runs-on : ubuntu-latest
     steps:
       - name: say hello
         run: echo "Hello World!"
   echo-goodbye:
-    runs-on : ubuntu-lates
+    runs-on : ubuntu-latest
     steps:
       - name: Failed step
         run: |
