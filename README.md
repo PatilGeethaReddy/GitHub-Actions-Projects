@@ -1,1 +1,1 @@
-This repo contains all github actions workflows examples
+This repo contains all github actions workflows examples.
