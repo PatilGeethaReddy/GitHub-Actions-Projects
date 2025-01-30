@@ -4,10 +4,10 @@ jobs:
     Build:
         runs-on: ubuntu-latest
         steps:
-        - name: checkout code 
-          uses: actions/checkout@v4
-        - name: print files
-          run: ls  
+            - name: checkout code 
+              uses: actions/checkout@v4
+            - name: print files
+              run: ls  
         # 0. Checkout the code from repo 
         # 1. install dep of our react applications
         # 2. Execute automate tasks
