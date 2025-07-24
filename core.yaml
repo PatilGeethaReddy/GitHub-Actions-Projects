@@ -1,0 +1,330 @@
+##Template Version 1.6 #
+
+name: CI-For-Main
+
+
+on:
+  repository_dispatch:
+    types: [trigger_webmodule]
+  
+  workflow_dispatch:
+  
+  push:
+    branches:
+      - 'master'
+      - 'java-cicd*'
+      - 'master_bckp'
+      - 'hotfix*'
+      - 'JDK17_Spring_Hibernate'
+      - 'UK_artifacts'
+    paths-ignore:
+      - '**.md'
+    tags-ignore:
+      - '**'
+
+
+env:
+  GIT_USER_EMAIL: "actions@github.com"
+  GIT_USER_NAME: "GitHub Actions"
+  ENV_CONFIG_FILE: ".github/env-variables.txt"
+  ACTIONS_ALLOW_UNSECURE_COMMANDS: true 
+  SERVICE_NAME: "dataroomcore"
+  buildextensionroot: "Cobalt_Team_Build_2010_Extension"
+  CUMULUS_FOLDERS: deployspecs inputs pipelines templates
+  GH_PAT: ${{ secrets.GH_PAT }}
+
+    
+  
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions: write-all
+    outputs:
+      ENVIRONMENT_VARIABLE_PATH: ${{ env.ENV_CONFIG_FILE }}
+      UNIT_TEST_RESULTS_XML: ${{ steps.unit_test_file_name.outputs.UNIT_TEST_RESULTS_XML }}
+      COVERAGE_PERCENTAGE: ${{ steps.jacoco_reporter.outputs.coverage_percentage }}
+      BRANCH_RELEASE_TAG: ${{ steps.get_version.outputs.BRANCH_RELEASE_TAG }}
+      build_var: ${{ steps.artifactid.outputs.build_var }}
+      version: ${{ steps.build_number.outputs.version }}
+
+    steps:
+      - name: Checkout Git Repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref_name }}
+
+      - name: Create config path
+        run: |
+          echo "create Config folder" 
+          mkdir '${{ github.workspace}}/Config' 
+          echo "create TeamBuildTempFolder folder"
+          mkdir '${{ github.workspace}}/TeamBuildTempFolder'
+         
+      - name: Checkout Cobalt_DataRoom_Config
+        uses: actions/checkout@v4
+        with:
+          repository: tr/Cobalt_DataRoom_Config
+          token: ${{ secrets.GH_PAT }}
+          path: '${{ github.workspace}}/Config'
+
+      - name: Clone Cobalt_Team_Build_2010_Extension docs repository
+        uses: actions/checkout@v4
+        with:
+          repository: tr/Cobalt_Team_Build_2010_Extension
+          path: 'Cobalt_Team_Build_2010_Extension'
+          ref: main
+          token: ${{ secrets.GH_PAT }}
+          
+      - name: Set environment variables defined in the ENV_CONFIG_FILE
+        shell: bash
+        run: |
+          while read -r LINE || [ -n "$LINE" ] ; do
+            if [[ -n "$LINE" && ${LINE::1} != "#" ]]; then
+              echo "$LINE";
+            fi
+          done < ${{ env.ENV_CONFIG_FILE }} >> $GITHUB_ENV
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: corretto
+          java-version: 17
+
+      - name: Build version and Hotfix version
+        id: get-iteration
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        uses: tr/cobaltcm_actions/identifyRelease@main   
+
+      - name: Generate Build Version
+        id: build_number
+        run: |
+          version="${{ steps.get-iteration.outputs.iteration }}.${{ github.run_number }}"
+          echo "build_version=${version}" >> $GITHUB_ENV
+          echo "::set-output name=version::${version}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          
+      - name: Build Version
+        run: |
+          echo "The current build number is: "${{ env.build_version }}
+          echo "" >> resources/DataRoomCore.properties
+          echo application.version=${{ env.build_version }} >> resources/DataRoomCore.properties
+          echo application.name=DataRoomCore >> resources/DataRoomCore.properties
+ 
+      - name: Artifact Naming
+        id: artifactid 
+        run: |
+          build_var="${{ env.build_version }}"
+          echo ::set-output name=build_var::${build_var}
+          echo "${build_var}"
+ 
+      - name: Buildinfo
+        run: |
+            echo "DataRoomCore=${{ steps.artifactid.outputs.build_var }}" >> "buildinfo.txt"
+            manifestXmlLocation="${{ github.workspace }}/WebContent/Manifest.xml"
+            CacheNamePrefix="DataRoom"
+            VerticalName="DataRoomCore"
+
+            if [ -f "$manifestXmlLocation" ]; then
+                echo "= = ="
+                CacheVersion=$(grep -oP '<CacheVersion>\K[^<]+' "$manifestXmlLocation" 2>/dev/null || echo "No match found")
+                if [[ $CacheVersion =~ [0-9]+\.[0-9]+\.[0-9]+ ]]; then
+                    if [[ $CacheNamePrefix ]]; then
+                        echo "$CacheNamePrefix"'Cache='"$CacheVersion" >> "buildinfo.txt"
+                    else
+                        echo "$VerticalName"'Cache='"$CacheVersion" >> "buildinfo.txt"
+                    fi
+                fi
+            fi
+            filesize=$(stat -c%s "buildinfo.txt")
+            echo "File size: $filesize bytes"
+         
+      
+      - name: Update manifest files
+        shell: pwsh
+        run : |
+          $Build_BuildNumber = "${{ env.build_version }}"
+          $workingFolder = "${{ github.workspace}}/"
+          $Build_BuildNumber_wo_Name = ${{ env.build_version }}
+          $ManifestFile = "Manifest.xml"
+          $ManifestFileLocation = "${{ github.workspace}}/WebContent/"
+
+          # Update MANIFEST.MF
+          $manifestfiles = @()
+          (Get-ChildItem -Path $workingFolder -Include MANIFEST.MF -Force -ErrorAction SilentlyContinue -Recurse).FullName | ForEach-Object {if ($null -ne $_) {$manifestfiles += $_}}
+          Write-Output "Manifestfiles:" $manifestfiles 
+          Write-Output "Count" $manifestfiles.Count 
+          if ($manifestfiles.Count -gt 0){
+              foreach ($mfile in $manifestfiles){
+                  "`nChecking {0}" -f $mfile
+                  $lines_array = @()
+                  $file_content = $null
+                  $file_content = Get-Content $mfile | Where-Object {-not [string]::IsNullOrEmpty($PSItem)}
+                  foreach ($c_line in $file_content) {
+                      $lines_array += $c_line
+                  }
+                  foreach ($str in @('Specification-Version','Bundle-Version')){
+                      $str_regexp = [System.Text.RegularExpressions.Regex]::Escape($str)
+                      $searchText = $null
+                      $searchText = $file_content | ForEach-Object {$_ -match $str_regexp}
+                      if ($searchText -notcontains $true){
+                          $to_add = $null
+                          switch ($str) {
+                              'Specification-Version' { $to_add = "$str`: 1.0" }
+                              'Bundle-Version'        { $to_add = "$str`: 1.0.0" }
+                              Default                 { $to_add = "$str`: 1.0" }
+                          }
+                          $lines_array += $to_add
+                          if ((Get-ItemProperty -Path $mfile).IsReadOnly){
+                              Set-ItemProperty -Path $mfile -Name IsReadOnly -Value $False
+                          }
+                          Set-Content -Path $mfile -Value $lines_array
+                          Write-Output "Added $to_add to $mfile"
+                      }
+                  }
+              }
+          }
+
+          # Update Manifest.xml
+          $manifestxml = "${{ github.workspace}}\$ManifestFileLocation\$ManifestFile"
+          if (test-path -Path $manifestxml ){
+              $xml = New-Object XML
+              $xml.Load($manifestxml)
+              $element =  $xml.SelectSingleNode("//BuildNumber")
+              $element.InnerText =$Build_BuildNumber_wo_Name
+              $xml.Save($manifestxml)
+          }
+ 
+
+      - name: Build with Ant
+        run: |
+         ant normal_build -buildfile "./ant/CompileAntScript.xml" "-Ddir.tmpBuildDir=./TeamBuildTempFolder" "-DBuildNumber=${{ steps.artifactid.outputs.build_var }}" "-DJFROG_PASSWORD=${{ secrets.DATAROOM_JFROGTOKEN }}" -verbose
+
+      - name: Find Bugs
+        run: |
+         ant -buildfile "./ant/FindBugsAntScript.xml" "-Ddir.tmpBuildDir=./TeamBuildTempFolder" "-DBuildNumber=${{ steps.artifactid.outputs.build_var }}" -verbose
+
+      - name: Code Analysis
+        run: |
+           ant -buildfile "./ant/CheckStyleAntScript.xml" "-Ddir.tmpBuildDir=./TeamBuildTempFolder" "-DBuildNumber=${{ steps.artifactid.outputs.build_var }}" -verbose
+
+      - name: Test cases 
+        run: |
+           ant -buildfile "./ant/UnitTestAntScript.xml" "-DIsCoverageBuild=$(IsCoverageBuild)" "-Ddir.tmpBuildDir=./TeamBuildTempFolder" "-DBuildNumber=${{ steps.artifactid.outputs.build_var }}" "-Dlog.file=UnitTestLogFile.xml" -verbose
+         
+      - name: "listing"
+        shell: sh
+        run: |
+         pwd
+         ls -laRt
+
+      - name: Check and Get Commit SHA and commit date
+        id: check-sha
+        run: |
+          if [ -z "${{ github.sha }}" ]; then
+          echo "GITHUB_SHA=$(git rev-parse HEAD)" >> $GITHUB_ENV
+          else
+          echo "GITHUB_SHA=${{ github.sha }}" >> $GITHUB_ENV
+          fi
+          commit_date=$(git show -s --format=%ci $GITHUB_SHA)
+          CREATED_DATE=$(date -d "$commit_date" +"%Y-%m-%d %H:%M:%S%z")
+          echo "CREATED_DATE=$CREATED_DATE" >> $GITHUB_ENV
+
+      - name: fetch repo topics
+        shell: sh
+        run: |
+          gh_resp=$(gh api -H "Accept: application/vnd.github+json" /repos/${{ github.repository }}/topics)
+          echo REPO_TOPICS=$(echo "$gh_resp" | jq '.names') >> $GITHUB_ENV
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+
+      - name: Check repo properties
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Get all repo properties and iterate through them
+          echo $(gh api /repos/$GITHUB_REPOSITORY/properties/values) | jq -c '.[]' | while read i; do
+            # If the property name is "fedramp-scoped" then echo the key and value into GitHub Actions environment variables
+            if [[ $(echo $i | jq -r '.property_name') == "fedramp-scoped" ]]; then
+              echo "Setting FEDRAMP_SCOPED environment variable"
+              echo FEDRAMP_SCOPED=$(echo $i | jq -r '.value') >> $GITHUB_ENV
+            fi
+          done
+
+      - name: Setup Environment
+        id: setup-env
+        run: |
+          version="${{ steps.get-iteration.outputs.iteration }}.${{ github.run_number }}"
+          echo "version=${version}" >> $GITHUB_ENV
+          echo "version=${version}" >> $GITHUB_OUTPUT
+          echo -n $version > ./VERSION
+          echo '{"service_name":"${{ env.SERVICE_NAME }}", "fedramp-scoped":"${{ env.FEDRAMP_SCOPED }}", "github_repository":"${{ github.repository }}", "github_sha": "${{ env.GITHUB_SHA }}", "repo_topics":${{ env.REPO_TOPICS }}, "full_semver": "'v${version}'", "created_at": "'$CREATED_DATE'", "lead_time_to_release_days": "0.000"}' > release-info.json
+
+      - name: Create zip of published artifacts
+        shell: pwsh
+        run: |
+           mkdir BuildArtifacts
+           Copy-Item -Path dist\*,resources\*,buildinfo.txt -Destination .\BuildArtifacts -Force
+           Compress-Archive -Path BuildArtifacts\*,release-info.json,VERSION -Destination artifact.zip
+
+      - name: "listing"
+        shell: sh
+        run: |
+         pwd
+         ls -laRt
+
+      - name: Generate Build Provenance
+        uses: actions/attest-build-provenance@6149ea5740be74af77f260b9db67e633f6b0a9a1 # v1.4.2
+        with:
+          subject-path: "${{ github.workspace }}/artifact.zip"
+
+      - name: Create Release and Upload Artifacts
+        uses: ncipollo/release-action@v1.16.0
+        with:
+          artifacts: artifact.zip
+          tag: "${{ env.build_version }}"
+          name: "v${{ env.build_version }}"
+          token: ${{ secrets.GH_PAT }}
+          allowUpdates: true
+          replacesArtifacts: false
+
+      - name: Upload artifacts for publish
+        uses: actions/upload-artifact@v4
+        with:
+          name: Partifact
+          path: |
+            artifact.zip 
+            release-info.json
+            VERSION
+
+  CopytoUK-S3:
+    runs-on: codebuild-a209076-dr-dataroomcore-codebuild-${{ github.run_id }}-${{ github.run_attempt }}
+    needs: "build"
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: Partifact
+          path: ./artifacts
+
+      - name: unzip the zip
+        run: |
+          unzip artifacts/artifact.zip -d artifact
+
+      - name: list files
+        run: |
+          echo "version number is ${{ env.VERSION }}"
+          rm artifact/release-info.json
+          rm artifact/VERSION
+
+      - name: copytos3
+        run: |
+          aws s3 cp --recursive artifact s3://a209076-cbltdr-cobaltreleaseqc-euw2/DataRoomCore/${{ env.VERSION }}
+          echo "Listing s3 contents DataRoomCache"
+          aws s3 ls s3://a209076-cbltdr-cobaltreleaseqc-euw2/DataRoomCore/${{ env.VERSION }} --output table
